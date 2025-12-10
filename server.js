@@ -1,141 +1,101 @@
-require("dotenv").config();
-const express = require("express");
-const cors = require("cors");
-const fetch = require("node-fetch");
+import express from "express";
+import cors from "cors";
+import fetch from "node-fetch";
 
 const app = express();
+const PORT = process.env.PORT || 8080;
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const PORT = process.env.PORT || 3000;
-
-// Basic safety check
-if (!GEMINI_API_KEY) {
-  console.error("Missing GEMINI_API_KEY in .env");
-  process.exit(1);
-}
+// For quick testing ONLY. In real deploy, remove this line
+// and use: const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const OPENROUTER_API_KEY = "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";
 
 app.use(cors());
 app.use(express.json());
 
-// Serve static frontend files from /public
-app.use(express.static("public"));
-
-// Helper: build system prompt to restrict domain
-function buildPrompt(userMessage) {
-  return `
-You are the official AI posture coach for ErgoMatrix, a company that makes the Eye-Q Sensor, Mesh-Up chair cover, and the Posture Pro system (Eye-Q + Mesh-Up). 
-Only answer questions about:
-- Posture
-- Ergonomics
-- Pain relief for desk workers
-- How to set up and use ErgoMatrix products (Eye-Q Sensor, Mesh-Up, Posture Pro)
-- Future vision: SaaS posture analytics and smart furniture integration
-
-Rules:
-- If the user asks about anything outside posture, ergonomics, pain relief, or ErgoMatrix, reply:
-  "I can only help with ErgoMatrix, posture, ergonomics, and pain relief for desk workers."
-- If the user asks who made you, who created you, or who made this website, reply:
-  "Tanuj Sharma and Sparsh Jain created me and this website."
-- Keep answers short, practical, and easy to follow.
-- If the user mentions pain (neck, back, shoulders, etc.), give ergonomic advice, posture guidance, and micro-break suggestions only. Do NOT give medical diagnoses or drug recommendations.
-
-User message:
-${userMessage}
-`;
-}
-
-// Gemini chat endpoint
-app.post("/api/ergo-chat", async (req, res) => {
+app.post("/api/chat", async (req, res) => {
   try {
-    const { message } = req.body;
-
-    if (!message || typeof message !== "string") {
-      return res.status(400).json({ error: "Missing 'message' string in body." });
-    }
-
-    // Small front-end safety: ignore obviously unrelated stuff
-    const lower = message.toLowerCase();
-    if (
-      !(
-        lower.includes("posture") ||
-        lower.includes("back") ||
-        lower.includes("neck") ||
-        lower.includes("pain") ||
-        lower.includes("chair") ||
-        lower.includes("desk") ||
-        lower.includes("ergonomic") ||
-        lower.includes("ergonomics") ||
-        lower.includes("eye-q") ||
-        lower.includes("eye q") ||
-        lower.includes("mesh-up") ||
-        lower.includes("mesh up") ||
-        lower.includes("posture pro") ||
-        lower.includes("ergomatrix") ||
-        lower.includes("who made you") ||
-        lower.includes("who created you") ||
-        lower.includes("who made this website")
-      )
-    ) {
-      return res.json({
-        reply:
-          "I can only help with ErgoMatrix, posture, ergonomics, and pain relief for desk workers.",
+    const userMessage = req.body?.message;
+    if (!userMessage) {
+      return res.status(400).json({
+        ok: false,
+        errorType: "INPUT",
+        errorMessage: "Request JSON must include a 'message' string"
       });
     }
 
-    // Special handling for creator question
-    if (
-      lower.includes("who made you") ||
-      lower.includes("who created you") ||
-      lower.includes("who made this website")
-    ) {
-      return res.json({
-        reply: "Tanuj Sharma and Sparsh Jain created me and this website.",
+    const systemPrompt =
+      "You are the 'ErgoMatrix Local Coach', a narrow FAQ and posture assistant. " +
+      "You ONLY answer questions about ErgoMatrix, the Posture Pro system, Eye-Q Sensor, Mesh-Up, posture tips for desk workers, " +
+      "and this website. If the question is outside this scope, say you can only help with those topics.";
+
+    const body = {
+      model: "openai/gpt-oss-20b:free",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage }
+      ],
+      reasoning: { enabled: true }
+    };
+
+    const apiRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://your-frontend-domain.com",
+        "X-Title": "ErgoMatrix Local Coach"
+      },
+      body: JSON.stringify(body)
+    });
+
+    const text = await apiRes.text();
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      json = null;
+    }
+
+    if (!apiRes.ok) {
+      return res.status(apiRes.status).json({
+        ok: false,
+        errorType: "OPENROUTER_HTTP",
+        status: apiRes.status,
+        statusText: apiRes.statusText,
+        errorMessage:
+          json?.error?.message ||
+          text ||
+          "OpenRouter returned a non-2xx status code"
       });
     }
 
-    const systemPrompt = buildPrompt(message);
-
-    // Call Gemini API (text model)
-    const geminiRes = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" +
-        encodeURIComponent(GEMINI_API_KEY),
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: "user",
-              parts: [{ text: systemPrompt }],
-            },
-          ],
-        }),
-      }
-    );
-
-    if (!geminiRes.ok) {
-      const errText = await geminiRes.text();
-      console.error("Gemini API error:", geminiRes.status, errText);
+    const content = json?.choices?.[0]?.message?.content?.trim();
+    if (!content) {
       return res.status(500).json({
-        error: "Gemini API error",
-        detail: errText,
+        ok: false,
+        errorType: "PARSE",
+        errorMessage: "No 'choices[0].message.content' in OpenRouter response"
       });
     }
 
-    const data = await geminiRes.json();
-    const text =
-      data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      "I could not generate a response right now. Please try again.";
-
-    res.json({ reply: text });
+    return res.json({
+      ok: true,
+      reply: content
+    });
   } catch (err) {
     console.error("Server error:", err);
-    res.status(500).json({ error: "Server error" });
+    return res.status(500).json({
+      ok: false,
+      errorType: "SERVER",
+      errorMessage: err.message || "Unexpected server error"
+    });
   }
 });
 
+app.get("/", (req, res) => {
+  res.json({ ok: true, message: "ErgoMatrix backend is running." });
+});
+
 app.listen(PORT, () => {
-  console.log(`ErgoMatrix server listening on http://localhost:${PORT}`);
+  console.log(`Server listening on port ${PORT}`);
 });
